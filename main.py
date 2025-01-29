@@ -4,7 +4,7 @@ import httpx
 import questionary
 from rich.console import Console
 from rich.progress import track
-from langchain_community.llms import OpenAI
+from langchain_openai import OpenAI
 from dotenv import load_dotenv
 import shodan
 import subprocess
