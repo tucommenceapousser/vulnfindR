@@ -2,5 +2,7 @@ httpx
 questionary
 rich
 langchain
+langchain_openai
+openai
 python-dotenv
 beautifulsoup4
