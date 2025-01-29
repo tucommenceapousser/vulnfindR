@@ -1,4 +1,6 @@
 httpx
+censys
+reportlab
 questionary
 rich
 langchain
