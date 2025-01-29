@@ -1,0 +1,6 @@
+httpx
+questionary
+rich
+langchain
+python-dotenv
+beautifulsoup4
