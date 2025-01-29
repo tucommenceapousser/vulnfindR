@@ -1,113 +1,93 @@
 import os
-import json
+import asyncio
 import httpx
 import questionary
-import asyncio
-import concurrent.futures
-from bs4 import BeautifulSoup
 from rich.console import Console
-from rich.table import Table
-from rich.progress import Progress
-from langchain.llms import OpenAI
+from rich.progress import track
+from langchain_community.llms import OpenAI
+from dotenv import load_dotenv
+import shodan
+import subprocess
 
-# Configuration API
+# Chargement des variables d'environnement
+load_dotenv()
+console = Console()
+
+# Vérification des API Keys
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SHODAN_API_KEY = os.getenv("SHODAN_API_KEY")
 
-console = Console()
+if not OPENAI_API_KEY or not GROQ_API_KEY or not SHODAN_API_KEY:
+    console.print("[red]🚨 Erreur : Clé API manquante ! Vérifie ton fichier .env[/red]")
+    exit(1)
 
-# Liste des modules de scan
-SCANNERS = ["headers", "shodan", "nuclei", "wayback", "openai_analysis"]
+# Vérification des permissions Nuclei
+NUCLEI_PATH = subprocess.run(["which", "nuclei"], capture_output=True, text=True).stdout.strip()
+if NUCLEI_PATH:
+    subprocess.run(["chmod", "+x", NUCLEI_PATH])
 
-# Fonction pour scanner une URL avec HTTPX (rapide et performant)
-async def fetch_url(url):
+# Fonction pour scanner avec Nuclei
+async def scan_nuclei(target):
+    console.print("[yellow]🔍 Exécution de Nuclei...[/yellow]")
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(url)
-            return {"url": url, "status": response.status_code, "content": response.text}
+        result = subprocess.run(["nuclei", "-u", target], capture_output=True, text=True)
+        console.print(f"[green]✔ Résultats Nuclei :[/green]\n{result.stdout}")
     except Exception as e:
-        return {"url": url, "error": str(e)}
+        console.print(f"[red]❌ Erreur lors de l'exécution de Nuclei : {e}[/red]")
 
-# Scanner Shodan pour voir les services actifs
-async def scan_shodan(domain):
-    url = f"https://api.shodan.io/shodan/host/{domain}?key={SHODAN_API_KEY}"
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url)
-        return response.json() if response.status_code == 200 else None
+# Fonction pour scanner avec Shodan
+async def scan_shodan(target):
+    console.print("[blue]🌐 Recherche Shodan...[/blue]")
+    try:
+        shodan_api = shodan.Shodan(SHODAN_API_KEY)
+        result = shodan_api.host(target)
+        console.print(f"[green]✔ Résultats Shodan :[/green]\n{result}")
+    except Exception as e:
+        console.print(f"[red]❌ Erreur Shodan : {e}[/red]")
 
-# Scanner Nuclei (détection de vulnérabilités)
-async def scan_nuclei(url):
-    cmd = f"echo '{url}' | nuclei -silent -json"
-    result = os.popen(cmd).read()
-    return json.loads(result) if result else None
+# Fonction pour récupérer des archives WaybackMachine
+async def scan_wayback(target):
+    console.print("[cyan]📜 Analyse WaybackMachine...[/cyan]")
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://web.archive.org/cdx/search/cdx?url={target}&output=json", timeout=30)
+            if response.status_code == 200:
+                console.print(f"[green]✔ Archives trouvées !\n{response.json()}[/green]")
+            else:
+                console.print("[yellow]⚠ Aucune archive trouvée.[/yellow]")
+    except httpx.TimeoutException:
+        console.print("[red]⏳ Timeout lors de l'analyse WaybackMachine.[/red]")
 
-# Scanner Wayback Machine pour voir les anciennes versions
-async def scan_wayback(domain):
-    url = f"http://web.archive.org/cdx/search/cdx?url={domain}/*&output=json&limit=5"
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url)
-        return response.json() if response.status_code == 200 else None
-
-# Scanner OpenAI pour obtenir des suggestions de vulnérabilités
-def ai_suggestion(prompt):
+# Fonction d'analyse OpenAI
+async def ai_analysis(target):
+    console.print("[magenta]🤖 Analyse AI avec OpenAI...[/magenta]")
     llm = OpenAI(api_key=OPENAI_API_KEY)
-    return llm.predict(prompt)
+    prompt = f"Quels sont les risques de sécurité pour le site {target} ?"
+    response = llm.predict(prompt)
+    console.print(f"[green]✔ Résultats AI :[/green]\n{response}")
 
-# Analyse avancée avec plusieurs scanners en parallèle
-async def analyze_target(url):
-    domain = url.replace("https://", "").replace("http://", "").split("/")[0]
+# Fonction principale d'analyse
+async def analyze_target(target):
+    tasks = {
+        "nuclei": scan_nuclei(target),
+        "shodan": scan_shodan(target),
+        "wayback": scan_wayback(target),
+        "openai": ai_analysis(target)
+    }
+    await asyncio.gather(*tasks.values())
 
-    console.print(f"[bold cyan]🔍 Analyse en cours pour : {url}[/bold cyan]")
-
-    # Multi-threading pour les tâches CPU-heavy
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        tasks = {
-            "headers": fetch_url(url),
-            "shodan": scan_shodan(domain),
-            "nuclei": scan_nuclei(url),
-            "wayback": scan_wayback(domain)
-        }
-        
-        results = await asyncio.gather(*tasks.values())
-
-    # Organiser les résultats
-    scan_results = dict(zip(tasks.keys(), results))
-
-    # Analyse avec OpenAI
-    ai_prompt = f"Analyse de sécurité pour {url} avec ces résultats : {scan_results}. Quelles vulnérabilités potentielles ?"
-    scan_results["openai_analysis"] = ai_suggestion(ai_prompt)
-
-    return scan_results
-
-# Affichage interactif des résultats
-def display_results(results):
-    table = Table(title="Résultats de l'analyse", show_lines=True)
-    table.add_column("Module", justify="left", style="cyan", no_wrap=True)
-    table.add_column("Résultat", justify="left", style="green")
-
-    for key, value in results.items():
-        result_str = json.dumps(value, indent=2) if isinstance(value, dict) else str(value)
-        table.add_row(key, result_str[:100] + "..." if len(result_str) > 100 else result_str)
-
-    console.print(table)
-
-# Interface interactive
+# Interface utilisateur
 def main():
-    console.print("[bold yellow]🛡️ Outil de pentest interactif[/bold yellow]\n")
-    url = questionary.text("Entrez l'URL cible :").ask()
-
-    # Exécuter l'analyse asynchrone
-    results = asyncio.run(analyze_target(url))
-
-    # Afficher les résultats
-    display_results(results)
-
-    # Sauvegarder en JSON
-    with open("scan_results.json", "w") as f:
-        json.dump(results, f, indent=4)
-
-    console.print("[bold magenta]📁 Résultats sauvegardés dans scan_results.json[/bold magenta]")
+    console.print("[bold green]🛡️ Outil de pentest interactif[/bold green]")
+    
+    url = questionary.text("🌐 Entrez l'URL cible").ask()
+    if not url:
+        console.print("[red]⚠ Veuillez entrer une URL valide.[/red]")
+        return
+    
+    console.print(f"[yellow]🔍 Analyse en cours pour : {url}[/yellow]")
+    asyncio.run(analyze_target(url))
 
 if __name__ == "__main__":
     main()
